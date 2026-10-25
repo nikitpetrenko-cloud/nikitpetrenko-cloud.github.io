@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.nikita.deadpoolvr",
+      "sha256_cert_fingerprints": [
+        "38:B3:82:2E:60:27:11:E8:92:CD:B4:10:EC:20:E3:5B:46:95:71:F7:49:BF:AF:81:E7:95:22:92:30:AA:0B:6B"
+      ]
+    }
+  }
+]
