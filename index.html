@@ -210,6 +210,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       document.body.appendChild(vrBtn);
       // Попытка запуска сразу в иммерсивном режиме (если поддерживается браузером/TWA)
       offer();
+      // Запуск как приложение (TWA/PWA на Quest): страницы не видно, пока нет VR-сессии — просим сессию сами, с повторами
+      const asApp = (document.referrer || '').indexOf('android-app://') === 0 || DP.q.has('autovr') ||
+        (window.matchMedia && (matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: minimal-ui)').matches));
+      if (asApp) {
+        let tries = 0;
+        const tick = () => {
+          if (DP.state.vr || tries++ > 40) return;
+          navigator.xr.requestSession('immersive-vr', opts).then(onSession).catch((e) => { DP.autoVrErr = String(e && e.message || e); setTimeout(tick, 1500); });
+        };
+        tick();
+      }
     }).catch(() => {});
   }
   // ---------- game control ----------
