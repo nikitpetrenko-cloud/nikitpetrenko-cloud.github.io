@@ -173,7 +173,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (offered || !navigator.xr.offerSession) return;
       try { offered = true; navigator.xr.offerSession('immersive-vr', opts).then((s) => { offered = false; onSession(s); }).catch(() => { offered = false; }); } catch (e) { offered = false; }
     };
+    DP.xrLog = [];
+    const xl = (m) => { DP.xrLog.push(((performance.now() / 1000) | 0) + 's ' + m); };
     const onSession = (sess) => {
+      xl('onSession');
       if (DP.state.vr || (renderer.xr.isPresenting && renderer.xr.getSession && renderer.xr.getSession())) { try { sess.end(); } catch (e) { /* ignore */ } return; }
       let setP;
       try { setP = renderer.xr.setSession(sess); } catch (e) { setP = Promise.reject(e); }
@@ -213,11 +216,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       // Запуск как приложение (TWA/PWA на Quest): страницы не видно, пока нет VR-сессии — просим сессию сами, с повторами
       const asApp = (document.referrer || '').indexOf('android-app://') === 0 || DP.q.has('autovr') ||
         (window.matchMedia && (matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: minimal-ui)').matches));
+      xl('supported asApp=' + asApp);
       if (asApp) {
         let tries = 0;
         const tick = () => {
           if (DP.state.vr || tries++ > 40) return;
-          navigator.xr.requestSession('immersive-vr', opts).then(onSession).catch((e) => { DP.autoVrErr = String(e && e.message || e); setTimeout(tick, 1500); });
+          xl('requestSession try ' + tries);
+          navigator.xr.requestSession('immersive-vr', opts).then(onSession).catch((e) => { DP.autoVrErr = String(e && e.message || e); xl('request failed: ' + DP.autoVrErr); setTimeout(tick, 1500); });
         };
         tick();
       }
