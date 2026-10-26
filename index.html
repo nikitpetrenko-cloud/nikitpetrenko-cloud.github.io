@@ -4187,9 +4187,11 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     return out;
   }
   function debugArena(id) { return beginArena(id || 'wolverine'); }
+  function spawnPickupAt(type, x, y, z) { return !!spawnPickup(null, type, x, y, z); }
+  function clearLoosePickups() { for (const pk of pickups) if (pk.on && !pk.slot) pk.on = false; }
   function debugPickups() { const out = []; for (const pk of pickups) if (pk.on) out.push({ type: pk.type, x: pk.x, y: pk.y, z: pk.z }); return out; }
   DP.register('world', {
-    init, reset, update, groundAt, resolve, beginArena, endArena, debugInfo, debugSpawnShed, debugArena, debugObs, debugPickups, sideTopAt, getMarkers,
+    init, reset, update, groundAt, resolve, beginArena, endArena, spawnPickupAt, clearLoosePickups, debugInfo, debugSpawnShed, debugArena, debugObs, debugPickups, sideTopAt, getMarkers,
     get arena() { return DP.state.arena; },
   });
 })();
@@ -7126,6 +7128,21 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     DP.heal(40); DP.addAmmo(14);
     ui('toast', '+40 HP  +14 патронов');
   }
+  let nextBossZ = 1e9, supplyT = 0;
+  // подвоз во время боя: аптечки и патроны появляются на арене
+  function supplyTick(b, dt) {
+    if (b.state !== 'fight') return;
+    supplyT -= dt;
+    if (supplyT > 0) return;
+    supplyT = 9 + Math.random() * 4;
+    const s = S(), w = DP.weapons, a = s.arena;
+    if (!a || !DP.world || !DP.world.spawnPickupAt) return;
+    const res = w && w.ammo ? (w.ammo.L.reserve + w.ammo.L.mag + w.ammo.R.reserve + w.ammo.R.mag) : 40;
+    let type = Math.random() < 0.5 ? 0 : 1;
+    if (res < 30) type = 1; else if (s.hp < 55) type = 0;
+    const ang = Math.random() * Math.PI * 2, r = 5 + Math.random() * 11;
+    DP.world.spawnPickupAt(type, a.center.x + Math.cos(ang) * r, a.floorY + 0.75, a.center.z + Math.sin(ang) * r);
+  }
   function finishBoss(b) {
     const s = S();
     s.slow = 1;
@@ -7143,6 +7160,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   }
   function endArena(final) {
     const s = S(), a = s.arena;
+    nextBossZ = s.p.z - 130; // следующий босс — только после того, как игрок вышел с арены и пробежал по новой трассе
+    try { if (DP.world && DP.world.clearLoosePickups) DP.world.clearLoosePickups(); } catch (e) { /* ignore */ }
     if (DP.world && DP.world.endArena && !(a && a.fallback)) { try { DP.world.endArena(); } catch (e) { console.error(e); } }
     if (a && a.fallback && a.meshes) { a.meshes.forEach((m) => { if (m.parent) m.parent.remove(m); }); }
     s.arena = null;
@@ -7181,6 +7200,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   DP.register('bosses', {
     init() { dummy = new THREE.Object3D(); },
     reset() {
+      nextBossZ = 1e9; supplyT = 3;
       removeFallbackArena();
       removeBoss();
       tgHideAll();
@@ -7200,11 +7220,12 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       const s = S();
       if (s.mode !== 'play') return;
       if (!B) {
-        if (!s.arena && s.bossIndex < 3 && s.clock >= DP.cfg.BOSS_TIMES[s.bossIndex]) startArena(s.bossIndex);
+        if (!s.arena && s.bossIndex < 3 && s.clock >= DP.cfg.BOSS_TIMES[s.bossIndex] && s.p.z <= nextBossZ) startArena(s.bossIndex);
         return;
       }
       const rdt = dt / Math.max(0.05, s.slow);
       B.anim += dt; B.st += dt; B.hitSayT -= dt; B.sinceHit += dt;
+      supplyTick(B, dt);
       updatePlayerVel(dt);
       const def = B.def;
       if (B.state === 'intro') {
