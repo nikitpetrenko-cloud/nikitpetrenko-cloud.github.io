@@ -4283,37 +4283,90 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     if (envTex) ['metal', 'frame', 'magM', 'blade', 'swordMetal', 'brass', 'glove', 'suit'].forEach((k) => { mats[k].envMap = envTex; mats[k].envMapIntensity = k === 'suit' || k === 'glove' ? 0.35 : 1.1; });
   }
   // ---------- модели ----------
+  // ---------- Desert Eagle Mark XIX ----------
+  // Чертёж в мм: u — вперёд от заднего среза кожуха (0..273), v — вверх от верха кожуха (0 .. -159 низ башмака).
+  // Масштаб GS (метры на мм) слегка увеличен под руку Quest; GZ/GY — положение начала координат в gunModel.
+  const GS = 0.0012, GZ = 0.1136, GY = 0.03, GT = 0.3;           // GT — тангенс наклона рукояти (~16.7° назад)
+  const gz = (u) => GZ - u * GS, gy = (v) => GY + v * GS;
+  const gBack = (v) => 23 + GT * (v + 100), gFront = (v) => gBack(v) + 52;
+  const GUN = { muzzle: [0, gy(-22), gz(274)], port: [0.0188, gy(-19), gz(93)], disp: [0, gy(0) + 0.0046, gz(62)] };
+  function prof(pts, w) { // боковой профиль → экструзия по X (ширина w, мм), по центру
+    const sh = new THREE.Shape();
+    pts.forEach((p, i) => { if (i) sh.lineTo(p[0] * GS, p[1] * GS); else sh.moveTo(p[0] * GS, p[1] * GS); });
+    const g = new THREE.ExtrudeGeometry(sh, { depth: w * GS, bevelEnabled: false });
+    g.translate(0, 0, -w * GS / 2); g.rotateY(Math.PI / 2); g.translate(0, GY, GZ);
+    return g;
+  }
+  // бокс в координатах чертежа: u0..u1, v0..v1, центр x (мм), ширина w (мм), наклон вокруг X
+  const ub = (u0, u1, v0, v1, xc, w, rx) => box(w * GS, (v1 - v0) * GS, (u1 - u0) * GS, xc * GS, gy((v0 + v1) / 2), gz((u0 + u1) / 2), rx || 0, 0, 0);
+  function gripTexture() {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = '#3a3a42'; x.fillRect(0, 0, 64, 64);
+    x.strokeStyle = '#0a0a0c'; x.lineWidth = 5;
+    x.beginPath();
+    for (let k = -2; k <= 4; k++) { x.moveTo(k * 32, 0); x.lineTo(k * 32 + 64, 64); x.moveTo(k * 32 + 64, 0); x.lineTo(k * 32, 64); }
+    x.stroke();
+    x.strokeStyle = '#55555e'; x.lineWidth = 1.5; // блик на гранях ромбов
+    x.beginPath();
+    for (let k = -2; k <= 4; k++) { x.moveTo(k * 32 + 3, 0); x.lineTo(k * 32 + 67, 64); }
+    x.stroke();
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / 0.012, 1 / 0.012);
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+    return t;
+  }
   function buildGunParts() {
-    const frame = [], dark = [], glow = [], sM = [], sD = [], mag = [];
-    // рамка + ствол-«трапеция»
-    frame.push(box(0.034, 0.04, 0.25, 0, -0.01, -0.065));
-    frame.push(trap(0.018, 0.034, 0.044, 0.09, 0, 0.03, -0.225));
-    frame.push(box(0.01, 0.028, 0.008, 0, -0.044, -0.1));            // скоба перед
-    frame.push(box(0.01, 0.008, 0.06, 0, -0.057, -0.07));            // скоба низ
-    frame.push(box(0.03, 0.05, 0.02, 0, -0.03, 0.07));               // задняя часть
-    // рукоять
-    dark.push(box(0.037, 0.125, 0.054, 0, -0.088, 0.045, -0.2, 0, 0));
-    dark.push(box(0.008, 0.022, 0.008, 0, -0.042, -0.058));          // спуск
-    dark.push(box(0.012, 0.012, 0.004, 0, 0.03, -0.2715));           // дульное
-    dark.push(box(0.006, 0.012, 0.016, -0.0215, 0.012, 0.03));       // предохранитель
-    dark.push(box(0.006, 0.012, 0.016, 0.0215, 0.012, 0.03));
-    // слайд (кожух) с вырезами
-    sM.push(box(0.04, 0.044, 0.25, 0, 0.03, -0.055));
-    sM.push(box(0.014, 0.007, 0.2, 0, 0.0555, -0.09));               // рельса
-    sD.push(box(0.0422, 0.014, 0.062, 0, 0.034, -0.125));            // окно спереди
-    sD.push(box(0.0424, 0.022, 0.05, 0, 0.03, 0.0));                 // окно выброса
-    for (let k = 0; k < 4; k++) sD.push(box(0.0418, 0.034, 0.004, 0, 0.03, 0.034 + k * 0.011)); // насечки
-    for (let k = 0; k < 7; k++) sD.push(box(0.016, 0.004, 0.008, 0, 0.0596, -0.17 + k * 0.026)); // риски рельсы
-    sD.push(box(0.006, 0.01, 0.008, 0, 0.0625, -0.17));              // мушка
-    sD.push(box(0.009, 0.008, 0.008, -0.0095, 0.056, 0.062));        // целик
-    sD.push(box(0.009, 0.008, 0.008, 0.0095, 0.056, 0.062));
-    // подсветка / акценты
-    glow.push(box(0.0356, 0.004, 0.06, 0, 0.018, -0.225));
-    glow.push(box(0.0352, 0.003, 0.12, 0, -0.02, -0.1));
-    // магазин
-    mag.push(box(0.028, 0.13, 0.04, 0, -0.1, 0.045, -0.2, 0, 0));
-    mag.push(box(0.034, 0.012, 0.047, 0, -0.164, 0.057, -0.2, 0, 0));
-    return { frame: merge(frame), dark: merge(dark), glow: merge(glow), sM: merge(sM), sD: merge(sD), mag: merge(mag) };
+    const frame = [], dark = [], glow = [], sM = [], sD = [], sG = [], mag = [], base = [];
+    // ---- рама: профиль с рукоятью, пальцевыми выемками, скобой, пылезащитным клином ----
+    const fp = [[60, -41], [-4, -41], [-4, -52], [gBack(-62), -62], [gBack(-146), -146], [gFront(-146), -146]];
+    [-130, -115, -100].forEach((vg) => {
+      fp.push([gFront(vg - 5), vg - 5], [gFront(vg - 3) - 3.5, vg - 3], [gFront(vg + 3) - 3.5, vg + 3], [gFront(vg + 5), vg + 5]);
+    });
+    fp.push([gFront(-88), -88], [156, -88], [164, -82], [160, -76], [165, -72], [248, -72], [263, -55], [263, -12],
+      [150, -12], [150, -80], [gFront(-80), -80], [gFront(-42), -42]);
+    frame.push(prof(fp, 26));
+    // ствол: трапециевидный блок, выступает из кожуха (u 240..273)
+    frame.push(trap(14 * GS, 24 * GS, 34 * GS, 33 * GS, 0, gy(-24), gz(256.5)));
+    frame.push(ub(262, 266, -9, -12, 0, 18));                           // ребро над клином
+    frame.push(trap(10 * GS, 15 * GS, 7 * GS, 5 * GS, 0, gy(-4), gz(268)));  // верхнее ребро ствола
+    dark.push(ub(246, 249, -10, -38, 6.6, 0.8), ub(246, 249, -10, -38, -6.6, 0.8)); // щель между кожухом и стволом
+    // дульный срез — чёрное отверстие
+    dark.push(cylZ(5.2 * GS, 5.2 * GS, 1.6 * GS, 8, 0, gy(-22), gz(273.4)));
+    // спусковой крючок (угловой)
+    dark.push(prof([[110, -44], [118, -44], [123, -58], [129, -71], [123, -75], [117, -63]], 5));
+    // защёлка магазина (слева) и рычаг затворной задержки
+    { const g = new THREE.CylinderGeometry(3.6 * GS, 3.6 * GS, 2.6 * GS, 8); g.rotateZ(Math.PI / 2); dark.push(xf(g, -14.2 * GS, gy(-56), gz(88))); }
+    dark.push(ub(100, 138, -45, -49, -13.7, 1.6));
+    // подсветка по бокам клина
+    glow.push(ub(172, 250, -60, -62.5, 13.3, 0.6), ub(172, 250, -60, -62.5, -13.3, 0.6));
+    // ---- кожух (откатывается) ----
+    sM.push(prof([[-2, -44], [4, 0], [249, 0], [253, -3], [253, -44]], 30));
+    for (let u = 18; u < 245; u += 9) if (u < 38 || u > 88) sM.push(ub(u, u + 5.5, 2.4, 5.2, 0, 11.4)); // планка Вивера: гребни
+    sD.push(ub(96, 253, -43, -44.6, 15.2, 0.7), ub(96, 253, -43, -44.6, -15.2, 0.7)); // шов кожух/рама
+    sD.push(ub(14, 247, 0, 2.6, 0, 10.6));                              // основание планки (канавки между гребнями)
+    sD.push(ub(38, 88, 0, 3.0, 0, 30));                                  // корпус табло
+    // целик «пенёк» с прорезью и мушка
+    sD.push(ub(5, 14, 2.4, 9, -4.7, 4.6), ub(5, 14, 2.4, 9, 4.7, 4.6), ub(5, 14, 2.4, 4, 0, 5));
+    sD.push(ub(236, 244, 2.4, 8, 0, 3.6));
+    // окно выброса справа
+    sD.push(ub(66, 120, -8, -32, 15.2, 0.8));
+    sD.push(ub(70, 116, -12, -28, 15.7, 0.4));
+    // косые насечки на заднике (обе стороны)
+    for (let k = 0; k < 8; k++) {
+      const u = 8 + k * 3.4;
+      sD.push(ub(u, u + 1.6, -10, -40, 15.2, 0.7, 0.42), ub(u, u + 1.6, -10, -40, -15.2, 0.7, 0.42));
+    }
+    // предохранитель — овальный рычаг, торчит с обеих сторон
+    { const g = new THREE.CylinderGeometry(5.6 * GS, 5.6 * GS, 38 * GS, 8); g.rotateZ(Math.PI / 2); g.scale(1, 1, 1.35); sD.push(xf(g, 0, gy(-14), gz(33))); }
+    sD.push(ub(44, 60, -9.5, -11.5, 17.6, 2.2), ub(44, 60, -9.5, -11.5, -17.6, 2.2)); // «лопасти» рычагов
+    sG.push(ub(128, 246, -38, -40.4, 15.3, 0.6), ub(128, 246, -38, -40.4, -15.3, 0.6));
+    // ---- накладки рукояти (отдельный меш с ромбовидной текстурой) ----
+    const grip = prof([[gBack(-64) + 4, -64], [gFront(-64) - 4, -64], [gFront(-142) - 4, -142], [gBack(-142) + 4, -142]], 31);
+    // ---- магазин ----
+    mag.push(prof([[gBack(-60) + 6, -60], [gFront(-60) - 6, -60], [gFront(-148) - 6, -148], [gBack(-148) + 6, -148]], 22));
+    base.push(prof([[gBack(-146) - 2, -146], [gFront(-146) + 2, -146], [gFront(-158) + 3, -158], [gBack(-158) - 3, -158]], 29));
+    return { frame: merge(frame), dark: merge(dark), glow: merge(glow), sM: merge(sM), sD: merge(sD), sG: merge(sG), mag: merge(mag), magBase: merge(base), grip };
   }
   function buildBlade() {
     const N = 10, L = 0.85, z0 = -0.1, K = 7;
@@ -4417,19 +4470,20 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     const kickG = new THREE.Group();
     const gunModel = new THREE.Group(); gunModel.position.set(0, 0.085, -0.045);
     const P = buildGunParts();
-    gunModel.add(mesh(P.frame, mats.frame), mesh(P.dark, mats.rubber), mesh(P.glow, mats.glow));
+    if (!mats.grip) mats.grip = new THREE.MeshStandardMaterial({ map: gripTexture(), color: 0xffffff, roughness: 0.8, metalness: 0.1, flatShading: true });
+    gunModel.add(mesh(P.frame, mats.frame), mesh(P.dark, mats.rubber), mesh(P.glow, mats.glow), mesh(P.grip, mats.grip));
     const slide = new THREE.Group();
-    slide.add(mesh(P.sM, mats.metal), mesh(P.sD, mats.rubber));
+    slide.add(mesh(P.sM, mats.metal), mesh(P.sD, mats.rubber), mesh(P.sG, mats.glow));
     gunModel.add(slide);
-    const magMesh = mesh(P.mag, mats.magM); gunModel.add(magMesh);
+    const magMesh = mesh(P.mag, mats.magM); magMesh.add(mesh(P.magBase, mats.frame)); gunModel.add(magMesh);
     // табло
     const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64;
     const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
-    const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.044, 0.022), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
-    disp.rotation.x = -Math.PI / 2 + 0.3; disp.position.set(0, 0.0545, 0.036);
+    const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.034, 0.017), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+    disp.rotation.x = -Math.PI / 2 + 0.3; disp.position.set(GUN.disp[0], GUN.disp[1], GUN.disp[2]);
     slide.add(disp);
-    const muzzle = new THREE.Object3D(); muzzle.position.set(0, 0.03, -0.275); gunModel.add(muzzle);
-    const port = new THREE.Object3D(); port.position.set(0.024, 0.036, 0.0); slide.add(port);
+    const muzzle = new THREE.Object3D(); muzzle.position.set(GUN.muzzle[0], GUN.muzzle[1], GUN.muzzle[2]); gunModel.add(muzzle);
+    const port = new THREE.Object3D(); port.position.set(GUN.port[0], GUN.port[1], GUN.port[2]); slide.add(port);
     kickG.add(gunModel);
     // катана
     const swordAnim = new THREE.Group();
@@ -4749,7 +4803,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         else if (rt < 0.8) { const u = (rt - 0.5) / 0.3; moff = (1 - u * u * (3 - 2 * u)) * 0.18; }
       }
       W.magMesh.visible = mvis;
-      W.magMesh.position.set(0, -0.98 * moff, 0.2 * moff);
+      W.magMesh.position.set(0, -0.98 * moff, GT * 0.98 * moff);
       // отдача и поза
       W.kick *= Math.exp(-dt * 16);
       let roll = 0, pitch = 0, py = 0;
