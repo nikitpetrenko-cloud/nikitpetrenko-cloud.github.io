@@ -73,7 +73,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   };
   DP.settings = Object.assign({
     timeScale: 1, comfort: true, master: 0.8, sfx: 1, voice: 1, music: 0.5,
-    leanRange: 0.22, swingThreshold: 2.2, aimAssist: true, difficulty: 'normal', skin: 'classic', weaponSet: 'gold', quality: 'auto',
+    leanRange: 0.22, swingThreshold: 2.2, aimAssist: true, difficulty: 'normal', skin: 'classic', weaponSet: 'gold', quality: 'auto', aimPitch: 0, crouchSlide: true,
   }, DP.save.get('settings', {}));
   DP.saveSettings = () => DP.save.set('settings', DP.settings);
   if (DP.q.has('fast')) DP.settings.timeScale = Math.max(1, +DP.q.get('fast') || 10);
@@ -111,6 +111,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
   let renderer, scene, camera, rig, glClock, dbgEl, vrBtn;
   let lowFpsT = 0, pixelRatioCur = 1;
+  const vrOff = { y: 0, z: 0 }; // визуальное сглаживание телепортов игрока в VR (ступени, хват уступа)
   DP.boot = function () {
     const canvas = document.createElement('canvas');
     canvas.id = 'gl';
@@ -165,18 +166,37 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function setupVR() {
     if (!navigator.xr) return;
     const opts = { optionalFeatures: ['local-floor', 'bounded-floor'] };
+    let offered = false;
+    const unlock = () => { try { DP.audio && DP.audio.unlock && DP.audio.unlock(); } catch (e) { /* ignore */ } };
+    const offer = () => {
+      // offerSession одноразовый: после выхода из VR предлагаем заново (кнопка «Enter VR» в UI браузера Quest)
+      if (offered || !navigator.xr.offerSession) return;
+      try { offered = true; navigator.xr.offerSession('immersive-vr', opts).then((s) => { offered = false; onSession(s); }).catch(() => { offered = false; }); } catch (e) { offered = false; }
+    };
     const onSession = (sess) => {
-      renderer.xr.setSession(sess);
+      if (DP.state.vr || (renderer.xr.isPresenting && renderer.xr.getSession && renderer.xr.getSession())) { try { sess.end(); } catch (e) { /* ignore */ } return; }
+      let setP;
+      try { setP = renderer.xr.setSession(sess); } catch (e) { setP = Promise.reject(e); }
       DP.state.vr = true;
       if (vrBtn) vrBtn.style.display = 'none';
-      try { DP.audio && DP.audio.unlock && DP.audio.unlock(); } catch (e) { /* ignore */ }
+      unlock();
+      // XR-события дают пользовательскую активацию: разблокируем звук по первому нажатию на контроллере
+      ['selectstart', 'squeezestart'].forEach((n) => sess.addEventListener(n, unlock));
+      // системное меню / снятие шлема: ставим на паузу
+      sess.addEventListener('visibilitychange', () => { if (sess.visibilityState !== 'visible' && DP.state.mode === 'play') DP.pause(); });
       sess.addEventListener('end', () => {
         DP.state.vr = false;
         if (vrBtn) vrBtn.style.display = '';
         camera.position.set(0, DP.cfg.EYE_H, 0);
         camera.rotation.set(0, 0, 0);
+        camera.quaternion.set(0, 0, 0, 1);
+        rig.rotation.set(0, 0, 0);
+        vrOff.y = vrOff.z = 0;
+        if (DP.state.mode === 'play') DP.pause();
         try { DP.ui && DP.ui.onVRChange && DP.ui.onVRChange(false); } catch (e) { /* ignore */ }
+        offer();
       });
+      if (setP && setP.catch) setP.catch((e) => { console.warn('setSession failed', e); DP.state.vr = false; if (vrBtn) vrBtn.style.display = ''; try { sess.end(); } catch (e2) { /* ignore */ } });
       try { DP.ui && DP.ui.onVRChange && DP.ui.onVRChange(true); } catch (e) { /* ignore */ }
     };
     DP.enterVR = () => navigator.xr.requestSession('immersive-vr', opts).then(onSession).catch((e) => { console.warn('VR session failed', e); DP.ui && DP.ui.toast && DP.ui.toast('Не удалось войти в VR'); });
@@ -189,7 +209,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       vrBtn.onclick = () => DP.enterVR();
       document.body.appendChild(vrBtn);
       // Попытка запуска сразу в иммерсивном режиме (если поддерживается браузером/TWA)
-      try { if (navigator.xr.offerSession) navigator.xr.offerSession('immersive-vr', opts).then(onSession).catch(() => {}); } catch (e) { /* ignore */ }
+      offer();
     }).catch(() => {});
   }
   // ---------- game control ----------
@@ -202,7 +222,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const S = DP.state;
     S.difficulty = DP.getDifficulty();
     S.clock = 0; S.real = 0; S.dist = 0; S.hp = S.maxHp = 100; S.speed = 0; S.invuln = 0.5; S.kills = 0; S.score = 0;
-    S.arena = null; S.bossIndex = 0; S.slow = 1; S.lastKillAt = -99; S.p = newBody();
+    S.arena = null; S.bossIndex = 0; S.slow = 1; S.lastKillAt = -99; S.p = newBody(); vrOff.y = vrOff.z = 0;
     DP.targets.length = 0;
     S.mode = 'play';
     DP.mods.forEach((n) => { try { if (DP[n] && DP[n].reset) DP[n].reset(); } catch (e) { console.error('reset ' + n, e); } });
@@ -408,7 +428,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         S.speed += (target - S.speed) * Math.min(1, dtg * 3);
         p.z -= S.speed * dtg;
         const tx = DP.clamp(I.steer, -1, 1) * C.LANE_W;
-        p.x += (tx - p.x) * Math.min(1, dtg * 9);
+        p.x += (tx - p.x) * Math.min(1, dtg * (S.vr ? 8 : 9));
         S.dist = Math.max(S.dist, -p.z);
         // стена сарая
         const sh = p.inShed;
@@ -433,9 +453,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
           for (let i = 0; i < 2; i++) { const hd = I.hands[i]; if (hd.present && hd.vel.y < -0.5) pullNow += -hd.vel.y * dt; }
           h.pull += pullNow * 0.6;
         }
-        const ok = S.vr ? (h.pull > 0.9 || h.t > 5) : (h.t > 0.55);
+        const ok = S.vr ? (h.pull > 0.9 || h.t > 4) : (h.t > 0.55);
         if (ok) { p.climb = { t: 0, y0: p.y, z0: p.z, L: h.L }; DP.sfx('pull'); }
       } else {
+        const yPrev = p.y, wasG = p.grounded;
         if (I.jump && p.jumpsLeft > 0) {
           p.vy = p.jumpsLeft === 2 ? C.JUMP_V : C.JUMP2_V;
           p.jumpsLeft--; p.grounded = false; p.sliding = false; p.slideT = 0;
@@ -454,11 +475,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
           p.y = g; p.vy = 0; p.grounded = true; p.jumpsLeft = 2;
         } else if (p.y > g + 0.06) p.grounded = false;
         if (!p.grounded) p.sliding = false;
+        if (wasG && p.grounded && p.y - yPrev > 0.02) vrOff.y -= p.y - yPrev; // шаг вверх по ступени — без рывка камеры в VR
         // хват уступа сарая
         const sh = p.inShed;
         if (sh && sh.ledge && !p.grounded) {
           const L = sh.ledge, hy = p.y + C.PLAYER_H + 0.1;
           if (p.z <= L.z + 0.95 && p.z >= L.z - 0.2 && hy >= L.topY - 0.55 && hy <= L.topY + 0.9 && p.y < L.topY - 0.9 && p.x >= L.x0 - 0.5 && p.x <= L.x1 + 0.5) {
+            vrOff.y += p.y - (L.topY - 1.85); vrOff.z += p.z - (L.z + 0.5);
             p.hang = { L, t: 0, pull: 0 }; p.vy = 0; p.y = L.topY - 1.85; p.z = L.z + 0.5; p.jumpsLeft = 0;
             DP.sfx('grab');
             try { DP.ui.prompt(S.vr ? 'ПОДТЯНИСЬ! Опусти руки вниз' : 'Подтягиваемся…', 'climb'); } catch (e) { /* */ }
@@ -466,14 +489,22 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         }
         if (p.y < C.VOID_Y) { DP.die('fall'); }
       }
-      if (DP.world && DP.world.resolve) DP.world.resolve(p, dtg);
+      if (DP.world && DP.world.resolve) {
+        const ry = p.y, rz = p.z;
+        DP.world.resolve(p, dtg);
+        const ddy = p.y - ry, ddz = p.z - rz;
+        if (ddy > 0.05 || ddy < -0.05 || ddz > 0.05 || ddz < -0.05) { vrOff.y -= ddy; vrOff.z -= ddz; } // телепорт от столкновения со ступенью
+      }
     }
     // позиция рига и камеры (во всех режимах)
     const slideTarget = p.sliding ? 1 : 0;
     p.slideDrop += (slideTarget - p.slideDrop) * Math.min(1, dt * 12);
     if (S.vr) {
-      rig.position.set(p.x, p.y - p.slideDrop * 0.45, p.z);
+      const kd = Math.exp(-dt * 8);
+      vrOff.y = DP.clamp(vrOff.y * kd, -2.5, 2.5); vrOff.z = DP.clamp(vrOff.z * kd, -2.5, 2.5);
+      rig.position.set(p.x, p.y - p.slideDrop * 0.45 + vrOff.y, p.z + vrOff.z);
     } else {
+      vrOff.y = vrOff.z = 0;
       rig.position.set(p.x, p.y, p.z);
       const bob = S.mode === 'play' && p.grounded && !p.sliding ? Math.sin(DP.time * 14) * 0.025 * Math.min(1, S.speed / 10) : 0;
       const eye = DP.lerp(C.EYE_H, C.SLIDE_EYE_H, p.slideDrop) + bob;
@@ -556,6 +587,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     hands: [mkHand(), mkHand()],
     fire: [false, false], attack: false, block: false, swap: false, reload: false,
     pointers: [], height: 1.65,
+    torso: { pos: new V3(), fwd: new V3(0, 0, -1), right: new V3(1, 0, 0), rel: [new V3(), new V3()] },
     haptic() {}, calibrate() {},
   };
   s.hands[0].obj.name = 'handL'; s.hands[1].obj.name = 'handR';
@@ -585,6 +617,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   const prevB = [0, 1].map(() => ({ trig: false, grip: false, a: false, b: false, thumb: false }));
   const xr = { ctrl: [null, null], grip: [null, null], src: [null, null], slotHand: [0, 1] };
   let calX = 0, calY = 1.65, calTimer = -1, yHold = 0, yFired = false;
+  let torsoInit = true, torsoX = 0, torsoZ = 0, torsoDX = 0, torsoDZ = -1;
+  const needSeed = [true, true], fireLock = [false, false], thumbT = [0, 0];
+  let runSettle = 0, crouchArmed = true, thumbChord = 0, chordFired = false;
   const virtualPos = [new V3(-0.28, -0.3, -0.5), new V3(0.28, -0.3, -0.5)];
   function arenaOn() { const a = DP.state.arena; return !!(a && a.entered); }
   function isTyping(el) { return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable); }
@@ -804,7 +839,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         r.thumb = btnDown(gp, 3);
         r.a = btnDown(gp, 4);
         r.b = btnDown(gp, 5);
-        r.menu = gp.buttons && gp.buttons.length > 6 ? btnDown(gp, 6) : false;
+        // buttons[6] у Touch — thumbrest (только касание): не использовать как «меню»
         const ax = gp.axes || [];
         if (ax.length >= 4) { r.sx = ax[2] || 0; r.sy = ax[3] || 0; } else if (ax.length >= 2) { r.sx = ax[0] || 0; r.sy = ax[1] || 0; }
       }
@@ -865,7 +900,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     s.mode = mode;
     const modeChanged = mode !== prevMode;
     if (modeChanged) {
-      if (mode === 'vr') { calTimer = 0.7; hadPrev[0] = hadPrev[1] = false; cam.rotation.set(0, 0, 0); lookYaw = lookPitch = 0; }
+      if (mode === 'vr') { calTimer = 0.7; torsoInit = true; needSeed[0] = needSeed[1] = true; hadPrev[0] = hadPrev[1] = false; cam.rotation.set(0, 0, 0); lookYaw = lookPitch = 0; }
       else { calTimer = -1; }
       attachHands(mode === 'vr');
       prevMode = mode;
@@ -897,7 +932,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (fakeOn) {
         const f = DP.input.fake || {};
         s.head.local.set(+f.headLocalX || 0, f.headY != null ? +f.headY : calY, +f.headZ || 0);
-        s.head.quat.copy(rigQ);
+        s.head.quat.copy(rigQ); if (f.headQuat) s.head.quat.multiply(f.headQuat);
       } else {
         s.head.local.copy(cam.position);
         s.head.quat.copy(rigQ).multiply(cam.quaternion);
@@ -905,19 +940,40 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       s.head.pos.copy(s.head.local).applyQuaternion(rigQ).add(rigPred);
       s.head.fwd.set(0, 0, -1).applyQuaternion(s.head.quat);
       if (calTimer > 0) { calTimer -= dt; if (calTimer <= 0 && s.head.local.y > 0.3) calibrate(); }
+      // ----- «туловище»: yaw головы (устойчивый к наклону вверх/вниз) с медленным сглаживанием + сглаженная позиция -----
+      {
+        let fx = s.head.fwd.x, fz = s.head.fwd.z;
+        if (fx * fx + fz * fz < 0.15) { // смотрит почти вертикально: берём «макушку» головы
+          t1.set(0, 1, 0).applyQuaternion(s.head.quat);
+          const sg = s.head.fwd.y < 0 ? 1 : -1;
+          fx = t1.x * sg; fz = t1.z * sg;
+        }
+        const l = Math.hypot(fx, fz);
+        if (l > 1e-4) { fx /= l; fz /= l; } else { fx = torsoDX; fz = torsoDZ; }
+        if (torsoInit) { torsoDX = fx; torsoDZ = fz; torsoX = s.head.local.x; torsoZ = s.head.local.z; torsoInit = false; }
+        else {
+          const kY = 1 - Math.exp(-dt * 3), kP = 1 - Math.exp(-dt * 2.5);
+          torsoDX += (fx - torsoDX) * kY; torsoDZ += (fz - torsoDZ) * kY;
+          const m = Math.hypot(torsoDX, torsoDZ) || 1; torsoDX /= m; torsoDZ /= m;
+          torsoX += (s.head.local.x - torsoX) * kP; torsoZ += (s.head.local.z - torsoZ) * kP;
+        }
+        const T = s.torso;
+        T.fwd.set(torsoDX, 0, torsoDZ); T.right.set(-torsoDZ, 0, torsoDX);
+        T.pos.set(torsoX, 0, torsoZ).applyQuaternion(rigQ).add(rigPred); T.pos.y = s.head.pos.y;
+      }
       // ----- руки -----
       if (fakeOn) gatherFake(); else gatherReal();
-      const pitch = DP.input.AIM_PITCH || 0;
+      const pitch = (DP.settings.aimPitch || 0) * DEG + (DP.input.AIM_PITCH || 0);
       if (pitch) pitchQ.setFromAxisAngle(AX, pitch);
-      let anyJump = false, anySlide = false, swapEdge = false, stickMax = 0, mvx = 0, mvy = 0;
+      let anyJump = false, anySlide = false, swapEdge = false, stickMax = 0, mvx = 0, mvy = 0, thumbBoth = 0;
       for (let i = 0; i < 2; i++) {
         const h = s.hands[i], r = vrRaw[i], pb = prevB[i];
         if (!r.present) {
-          h.present = false; hadPrev[i] = false;
+          h.present = false; hadPrev[i] = false; needSeed[i] = true;
           h.trigger = 0; h.triggerHeld = false; h.grip = false; h.stickX = h.stickY = 0;
           if (pb.trig) h.triggerReleased = true;
           pb.trig = pb.grip = pb.a = pb.b = pb.thumb = false;
-          s.fire[i] = false;
+          s.fire[i] = false; thumbT[i] = 0;
           h.vel.multiplyScalar(0.8);
           continue;
         }
@@ -930,6 +986,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         h.quat.copy(rigQ).multiply(rawQ);
         h.pos.copy(r.p).applyQuaternion(rigQ).add(rigPred);
         h.aim.set(0, 0, -1).applyQuaternion(h.quat);
+        // положение руки в системе туловища (x — вправо, y — вверх от головы, z — вперёд)
+        t2.copy(h.pos).sub(s.head.pos);
+        s.torso.rel[i].set(t2.dot(s.torso.right), t2.y, t2.dot(s.torso.fwd));
         // скорость (относительно рига)
         if (hadPrev[i]) {
           t1.copy(r.p).sub(prevRel[i]).multiplyScalar(1 / dt).applyQuaternion(rigQ);
@@ -938,7 +997,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         prevRel[i].copy(r.p); hadPrev[i] = true;
         // кнопки
         h.trigger = r.trig;
-        const th = pb.trig ? r.trig > 0.35 : r.trig > 0.55;
+        let th = pb.trig ? r.trig > 0.35 : r.trig > 0.55;
+        if (needSeed[i]) {
+          // рука только появилась / забег только начался: текущее состояние кнопок — не «нажатие»
+          needSeed[i] = false;
+          pb.trig = th; pb.grip = r.grip; pb.a = r.a; pb.b = r.b; pb.thumb = r.thumb;
+          fireLock[i] = th; thumbT[i] = r.thumb ? 99 : 0;
+        }
+        // триггер, зажатый в момент старта забега, не стреляет, пока не отпущен
+        if (fireLock[i]) { if (th) th = false; else fireLock[i] = false; }
         h.triggerHeld = th;
         if (th && !pb.trig) h.triggerPressed = true;
         if (!th && pb.trig) h.triggerReleased = true;
@@ -946,7 +1013,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         if (r.grip && !pb.grip) h.gripPressed = true;
         if (r.a && !pb.a) { h.btnA = true; s.jump = true; }
         if (r.b && !pb.b) { h.btnB = true; s.slide = true; }
-        if (r.thumb && !pb.thumb) swapEdge = true;
+        // стик (нажатие): короткое = смена оружия, оба вместе удерживать = пауза
+        if (r.thumb) { thumbT[i] += dt; thumbBoth++; } else {
+          if (pb.thumb && thumbT[i] < 0.35 && thumbChord < 0.01) swapEdge = true;
+          thumbT[i] = 0;
+        }
         if (r.a) anyJump = true;
         if (r.b) anySlide = true;
         pb.trig = th; pb.grip = r.grip; pb.a = r.a; pb.b = r.b; pb.thumb = r.thumb;
@@ -955,11 +1026,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         s.fire[i] = th;
         const m = Math.hypot(h.stickX, h.stickY);
         if (m > stickMax) { stickMax = m; mvx = h.stickX; mvy = -h.stickY; }
-        // пауза: меню-кнопка левой руки либо удержание Y (0.8 с)
+        // пауза: удержание Y (левая рука) 0.8 с
         if (i === 0) {
-          if (r.menu && !yFired) { s.pausePressed = true; yFired = true; }
           if (r.b) { yHold += dt; if (yHold >= 0.8 && !yFired) { s.pausePressed = true; yFired = true; } }
-          else { yHold = 0; if (!r.menu) yFired = false; }
+          else { yHold = 0; yFired = false; }
         }
         // указатель
         const p = pool[i];
@@ -968,16 +1038,41 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         p.down = th; p.pressed = h.triggerPressed; p.hand = i;
         s.pointers.push(p);
       }
+      // пауза: оба стика зажаты 0.6 с
+      if (thumbBoth >= 2 && vrRaw[0].present && vrRaw[1].present) {
+        thumbChord += dt;
+        if (thumbChord >= 0.6 && !chordFired) { chordFired = true; s.pausePressed = true; }
+      } else if (thumbBoth === 0) { thumbChord = 0; chordFired = false; }
       s.jumpHeld = anyJump; s.slideHeld = anySlide;
       if (swapEdge) s.swap = true;
       s.move.x = mvx; s.move.y = mvy;
       s.block = false;
-      // steer
+      // ----- авто-калибровка в начале забега: пока игрок «устаивается», центр и рост догоняют голову -----
+      const hl = s.head.local;
+      if (runSettle > 0) {
+        runSettle -= dt;
+        const kc = 1 - Math.exp(-dt * 12);
+        calX += (hl.x - calX) * kc;
+        if (hl.y > 0.3) calY += (hl.y - calY) * kc;
+        s.height = calY; steerV = 0;
+      }
+      // ----- приседание = подкат (опционально) -----
+      const hk = Math.max(0.6, Math.min(1.4, calY / 1.65));
+      const drop = calY - hl.y;
+      if (drop < 0.2 * hk) crouchArmed = true;
+      else if (crouchArmed && drop > 0.4 * hk && runSettle <= 0 && st.mode === 'play' && DP.settings.crouchSlide !== false) { crouchArmed = false; s.slide = true; }
+      // ----- steer: наклон головы, мёртвая зона, «магнит» к центрам полос, сглаживание -----
       const lr = Math.max(0.05, DP.settings.leanRange || 0.22);
-      let n = (s.head.local.x - calX) / lr;
+      let n = (hl.x - calX) / lr;
       const dz = 0.04;
       n = Math.abs(n) < dz ? 0 : (n - Math.sign(n) * dz) / (1 - dz);
-      steerV += (clamp(n, -1, 1) - steerV) * kSm;
+      n = clamp(n, -1, 1);
+      // медленный возврат центра, пока игрок стоит в средней полосе (дрейф при перешагивании)
+      if (runSettle <= 0 && st.mode === 'play' && Math.abs(n) < 0.3) calX += (hl.x - calX) * Math.min(1, dt * 0.15);
+      // магнит: вблизи центра полосы ввод «прилипает» (убирает дрожание головы), непрерывно
+      const rn = Math.round(n), dn = n - rn, an = Math.abs(dn);
+      if (an < 0.3) { const u = an / 0.3; n = rn + dn * (0.45 + 0.55 * u * u); }
+      steerV += (n - steerV) * (1 - Math.exp(-dt * 11));
       s.steer = arena ? 0 : steerV;
     } else {
       // ===== плоские режимы =====
@@ -1072,8 +1167,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     prevFire[0] = prevFire[1] = false;
     s.steer = 0; s.move.x = s.move.y = 0; s.fire[0] = s.fire[1] = false;
     hadPrev[0] = hadPrev[1] = false;
-    yHold = 0;
-    if (s.mode === 'vr') calibrate();
+    yHold = 0; thumbChord = 0; chordFired = false; crouchArmed = false;
+    needSeed[0] = needSeed[1] = true; torsoInit = true;
+    if (s.mode === 'vr') { calibrate(); runSettle = 0.8; }
   }
   function init() {
     const R = DP.renderer;
@@ -3203,10 +3299,10 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     }
   }
   const OBS_DEF = {
-    crate: { hx: 0.78, hz: 0.78, h: 1.2, dmg: 18, tgt: true, rad: 1.0, col: 0x8a5e36 },
-    barrier: { hx: 1.0, hz: 0.36, h: 0.62, dmg: 15, tgt: false, rad: 0, col: 0xc8c4d4 },
-    fence: { hx: 1.0, hz: 0.25, h: 1.2, dmg: 20, tgt: true, rad: 1.15, col: 0x8d98b2 },
-    beam: { hx: 3.7, hz: 0.28, h: 0.36, dmg: 18, tgt: false, rad: 0, col: 0xf2c200 },
+    crate: { hx: 0.76, hz: 0.7, h: 1.05, dmg: 14, tgt: true, rad: 1.0, col: 0x8a5e36 },
+    barrier: { hx: 1.0, hz: 0.36, h: 0.62, dmg: 10, tgt: false, rad: 0, col: 0xc8c4d4 },
+    fence: { hx: 1.0, hz: 0.25, h: 1.05, dmg: 14, tgt: true, rad: 1.15, col: 0x8d98b2 },
+    beam: { hx: 3.7, hz: 0.28, h: 0.36, dmg: 14, tgt: false, rad: 0, col: 0xf2c200 },
   };
   function spawnObs(slot, type, x, y, z, yaw, bottom) {
     const P = obsPools[type]; if (!P || !P.free.length) return null;
@@ -3304,8 +3400,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     B.facade(-iw - 0.35, -iw - 0.34, floorY - 1.2, roofY - 0.02, -t1, -t0, ctx.bTint, 1, R(), R(), 1);
     B.facade(iw + 0.34, iw + 0.35, floorY - 1.2, roofY - 0.02, -t1, -t0, ctx.bTint, 1, R(), R(), 2);
     // ближняя и дальняя стены
-    S.box(-iw - 0.35, iw + 0.35, floorY - 1.2, roofY - 0.02, -t0, -t0 + 0.35, brick, 0.9);
-    S.box(-iw - 0.35, iw + 0.35, floorY - 1.2, roofY - 0.02, -t1 - 0.9, -t1, brick, 1.05);
+    S.box(-iw - 0.35, iw + 0.35, floorY - 1.2, roofY - 0.02, -t0, -t0 + 0.35, brick, 1.2);
+    S.box(-iw - 0.35, iw + 0.35, floorY - 1.2, roofY - 0.02, -t1 - 0.9, -t1, brick, 1.7);
     // уступ: жёлто-чёрная кромка + светящаяся линия
     let i = 0;
     for (let x = -iw; x < iw - 0.01; x += 0.5, i++) S.box(x, Math.min(x + 0.5, iw), roofY - 0.5, roofY - 0.04, -t1, -t1 + 0.07, i & 1 ? 0x16141c : 0xf2c200, 1);
@@ -3512,7 +3608,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         const s = st[i];
         if (p.z < s.zb + Rr * 0.8 && p.z > s.zEnd && Math.abs(p.x) <= sl.halfW && p.y < s.yHigh - cfg.STEP_UP) {
           _v3.set(p.x, s.yLow + 0.5, s.zb);
-          if (DP.damagePlayer(15, _v3, 'obstacle')) p.stun = 0.8;
+          if (DP.damagePlayer(12, _v3, 'obstacle')) p.stun = 0.8;
           fxc('debris', _v3, 0x6a6580, 8); DP.sfx('crate_break');
           p.y = s.yHigh; p.z = s.zb - Rr * 0.9 - 0.05; p.vy = 0; p.grounded = true; p.jumpsLeft = 2; p.sliding = false; p.slideT = 0;
         }
@@ -3790,7 +3886,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     b.box(-0.78, 0.78, 0.0, 0.14, -0.78, 0.78, 0x5a3a20, 1); b.box(-0.78, 0.78, 1.06, 1.2, -0.78, 0.78, 0x5a3a20, 1);
     b.rbox(0, 0.6, 0.77, 1.7, 0.13, 0.04, 0, 0, 0.74, 0x6a4628, 1); b.rbox(0, 0.6, -0.77, 1.7, 0.13, 0.04, 0, 0, -0.74, 0x6a4628, 1);
     b.box(-0.2, 0.2, 0.5, 0.7, 0.76, 0.79, 0xc8c4d4, 1);
-    g.crate = b.toGeo();
+    g.crate = b.toGeo(); g.crate.scale(1, 0.875, 1);
     b = new Builder(300, 1500, false);
     b.box(-1, 1, 0, 0.22, -0.3, 0.3, 0xb9b4c0, 1); b.box(-0.9, 0.9, 0.22, 0.44, -0.24, 0.24, 0xb9b4c0, 0.95); b.box(-0.8, 0.8, 0.44, 0.62, -0.17, 0.17, 0xb9b4c0, 1);
     for (let i = 0; i < 6; i++) b.box(-0.8 + i * 0.27, -0.8 + i * 0.27 + 0.135, 0.44, 0.62, 0.17, 0.2, i & 1 ? 0xff6a1a : 0xf4f0f8, 1);
@@ -3802,7 +3898,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     for (let i = 0; i < 12; i++) b.box(-0.84 + i * 0.153, -0.82 + i * 0.153, 0.04, 1.08, -0.015, 0.015, 0x6a7690, 0.9);
     for (let i = 0; i < 10; i++) { b.rbox(-0.9 + i * 0.2, 1.17, 0, 0.22, 0.03, 0.03, 0, 0, i & 1 ? 0.7 : -0.7, 0xb0b8c8, 1); }
     b.box(-0.3, 0.3, 0.45, 0.8, 0.05, 0.065, 0xf2c200, 1); b.box(-0.05, 0.05, 0.5, 0.72, 0.066, 0.07, 0x16141c, 1);
-    g.fence = b.toGeo();
+    g.fence = b.toGeo(); g.fence.scale(1, 0.875, 1);
     b = new Builder(500, 2500, false);
     for (let i = 0; i < 14; i++) b.box(-3.7 + i * 0.5286, -3.7 + (i + 1) * 0.5286, -0.18, 0.18, -0.18, 0.18, i & 1 ? 0x16141c : 0xf2c200, 1);
     b.box(-3.82, -3.6, -1.9, 0.2, -0.22, 0.22, 0x56627a, 1); b.box(3.6, 3.82, -1.9, 0.2, -0.22, 0.22, 0x56627a, 1);
@@ -4064,8 +4160,9 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     return out;
   }
   function debugArena(id) { return beginArena(id || 'wolverine'); }
+  function debugPickups() { const out = []; for (const pk of pickups) if (pk.on) out.push({ type: pk.type, x: pk.x, y: pk.y, z: pk.z }); return out; }
   DP.register('world', {
-    init, reset, update, groundAt, resolve, beginArena, endArena, debugInfo, debugSpawnShed, debugArena, debugObs, sideTopAt, getMarkers,
+    init, reset, update, groundAt, resolve, beginArena, endArena, debugInfo, debugSpawnShed, debugArena, debugObs, debugPickups, sideTopAt, getMarkers,
     get arena() { return DP.state.arena; },
   });
 })();
@@ -4280,7 +4377,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       base: new V3(), tip: new V3(), dir: new V3(0, 0, -1), vel: new V3(), speed: 0, tipVel: new V3(), tipSpeed: 0,
       prevBase: new V3(), prevTip: new V3(), prevOk: false, swingSfxCd: 0, wasFast: false,
       dnPeak: 0, dnT: -99, dnBase: new V3(), dnTip: new V3(),
-      trailAcc: 0, hudKey: '', hudSet: '', root: null,
+      trailAcc: 0, hudKey: '', hudSet: '', root: null, zone: 0,
     };
   }
   // ---------- сборка рук ----------
@@ -4739,21 +4836,41 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     // --- жесты / смена оружия ---
     if (play) {
       if (vr) {
+        // зоны привязаны к туловищу (I.torso: сглаженный yaw + позиция), а не к направлению взгляда
+        const T = I.torso, hk = clamp((I.height || 1.65) / 1.65, 0.7, 1.35);
         for (let i = 0; i < 2; i++) {
           const h = I.hands[i], W = Ws[i];
-          if (!h || !h.present || !h.gripPressed) continue;
-          _a.copy(h.pos).sub(I.head.pos);
-          const dx = _a.dot(_rightF), dz = _a.dot(_fwdF), dy = _a.y;
-          const inSword = dy > -0.1 && Math.hypot(dx, dy - 0.15, dz + 0.18) <= 0.35;
-          const inGun = dy < -0.55 && dy > -1.0 && Math.abs(dx) <= 0.45 && Math.abs(dz) <= 0.45;
+          if (!h || !h.present) { W.zone = 0; continue; }
+          let dx, dy, dz;
+          if (T && T.rel && T.rel[i]) { dx = T.rel[i].x; dy = T.rel[i].y; dz = T.rel[i].z; }
+          else { _a.copy(h.pos).sub(I.head.pos); dx = _a.dot(_rightF); dz = _a.dot(_fwdF); dy = _a.y; }
+          const side = W.side;
+          // над плечом / за головой (сфера за затылком, чуть к «своему» плечу)
+          const inSword = dy > -0.12 && Math.hypot(dx - side * 0.1, dy - 0.15, dz + 0.18) <= 0.4;
+          // бедро: ниже пояса сбоку-спереди (масштабируется по росту)
+          const inGun = !inSword && dy / hk < -0.5 && dy / hk > -1.08 && Math.abs(dx) / hk <= 0.5 && Math.abs(dz) / hk <= 0.5;
+          const zone = inSword ? 2 : inGun ? 1 : 0;
+          if (zone !== W.zone) { W.zone = zone; if (zone) haptic(i, 0.18, 22); } // тихий «тик», когда рука нашла зону
+          if (!h.gripPressed) continue;
           if (inSword) equip(W, W.equipped === 'sword' ? 'none' : 'sword', false);
-          else if (inGun) equip(W, W.equipped === 'none' ? 'gun' : 'none', false);
+          else if (inGun) equip(W, W.equipped === 'gun' ? 'none' : 'gun', false);
+          if (inSword || inGun) haptic(i, 0.5, 40);
+        }
+        // запасной вариант без жестов: короткое нажатие стика — переключить обе руки пистолеты <-> катаны
+        if (I.swap) {
+          const to = Ws[0].equipped === 'gun' || Ws[1].equipped === 'gun' ? 'sword' : 'gun';
+          equip(Ws[0], to, false); equip(Ws[1], to, true);
         }
       } else if (I.swap) {
         const to = Ws[0].equipped === 'gun' || Ws[1].equipped === 'gun' ? 'sword' : 'gun';
         equip(Ws[0], to, false); equip(Ws[1], to, true); Ws[1].draw = 0;
       }
       if (I.reload) Ws.forEach((W) => startReload(W, true));
+    }
+    // после победы над боссом — вернуть пистолеты
+    if (api._bi !== DP.state.bossIndex) {
+      if (api._bi !== undefined && DP.state.bossIndex > api._bi && (Ws[0].equipped === 'sword' || Ws[1].equipped === 'sword')) { equip(Ws[0], 'gun', false); equip(Ws[1], 'gun', true); }
+      api._bi = DP.state.bossIndex;
     }
     // --- блок ---
     let blocking = false;
@@ -5174,15 +5291,33 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         spawnDrone(x, base + DP.rand(2.2, 4), z);
         return true;
       }
-      const track = S.dist > 200 && rnd() < 0.22;
-      let x;
-      if (track) x = DP.pick([-1, 0, 1]) * DP.cfg.LANE_W;
-      else x = (rnd() < 0.5 ? -1 : 1) * DP.rand(4, 9);
-      const g = groundY(x, z, p.y + 10);
-      if (g === -Infinity || g > p.y + 9 || g < p.y - 12) continue;
-      if (track && Math.abs(g - p.y) > 1.5) continue;
+      // стрелок: 1) гнездо снайпера на соседней крыше, 2) край крыши соседнего здания, 3) край трассы (не на полосах игрока)
+      const W = DP.world;
+      const side = rnd() < 0.5 ? -1 : 1;
+      if (W && W.getMarkers && rnd() < 0.45) {
+        const mk = W.getMarkers('sniper-nest', p.z - 60, p.z - 110);
+        for (let i = 0; i < mk.length; i++) {
+          const m = mk[(rnd() * mk.length) | 0];
+          if (m.y < p.y - 9 || m.y > p.y + 7 || tooClose(m.x, m.z, 5)) continue;
+          spawnShooter(m.x, m.y, m.z, false);
+          return true;
+        }
+      }
+      if (W && W.sideTopAt && rnd() < 0.6) {
+        for (let xx = 5.6; xx < 13; xx += 0.8) {
+          const x = side * xx, top = W.sideTopAt(x, z);
+          if (!isFinite(top)) continue;
+          if (top < p.y - 8 || top > p.y + 7 || tooClose(x, z, 5)) break;
+          spawnShooter(x + side * 0.9, top, z, false);
+          return true;
+        }
+        continue;
+      }
+      const x = side * DP.rand(3.65, 4.1);
+      const g = groundY(x, z, p.y + 3);
+      if (g === -Infinity || Math.abs(g - p.y) > 2.5) continue;
       if (tooClose(x, z, 5)) continue;
-      spawnShooter(x, g, z, track);
+      spawnShooter(x, g, z, true);
       return true;
     }
     return false;
@@ -5291,7 +5426,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       e.strafeT -= dt;
       if (e.strafeT <= 0) {
         e.strafeT = DP.rand(2, 3.5);
-        const nx = DP.clamp(Math.round(e.x / DP.cfg.LANE_W) + DP.pick([-1, 1]), -1, 1) * DP.cfg.LANE_W;
+        const nx = Math.sign(e.x) * DP.rand(3.65, 4.1);
         const ng = groundY(nx, e.z, e.gy + 1);
         if (isFinite(ng) && Math.abs(ng - e.gy) < 0.3) e.tx = nx;
       }
@@ -5820,7 +5955,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     B.hp -= eff; B.sinceHit = 0;
     const f = B.hp / B.maxHp;
     // патроны за прогресс боя
-    while (B.ammoMark < 3 && f <= 1 - 0.25 * (B.ammoMark + 1)) { B.ammoMark++; DP.addAmmo(7); ui('toast', '+патроны'); }
+    while (B.ammoMark < 3 && f <= 1 - 0.25 * (B.ammoMark + 1)) { B.ammoMark++; DP.addAmmo(14); ui('toast', '+патроны'); }
     if (!B.lowSaid && f <= 0.3) { B.lowSaid = true; DP.say('boss' + B.n + '_low'); }
     else if (B.hitSayT <= 0 && Math.random() < 0.05) { B.hitSayT = 12; DP.say('boss' + B.n + '_hit'); }
     if (B.hp <= B.maxHp * 0.1) { B.hp = B.maxHp * 0.09; B.fatalPending = true; }
@@ -5998,12 +6133,12 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     if (A.type === 'dash') {
       if (A.ph === 'tele') {
         B.vx = B.vz = 0;
-        if (A.t < 0.4) {
+        if (A.t < 0.3) {
           A.yaw = Math.atan2(pl.x - B.x, pl.z - B.z); A.len = clamp(d + 3, 7, 18);
           turnTo(B, A.yaw, 12, dt);
         }
-        tgLine(0, B.x, B.z, A.yaw, A.len, 1.8, A.t < 0.4 ? 0xff3040 : 0xff8090, 0.45 + 0.4 * Math.abs(Math.sin(A.t * 22)));
-        if (A.t >= 0.7) { A.ph = 'act'; A.t = 0; A.sx = B.x; A.sz = B.z; A.hit = false; tgOff('lines', 0); DP.sfx('claw'); }
+        tgLine(0, B.x, B.z, A.yaw, A.len, 1.8, A.t < 0.3 ? 0xff3040 : 0xff8090, 0.45 + 0.4 * Math.abs(Math.sin(A.t * 22)));
+        if (A.t >= 0.9) { A.ph = 'act'; A.t = 0; A.sx = B.x; A.sz = B.z; A.hit = false; tgOff('lines', 0); DP.sfx('claw'); }
       } else if (A.ph === 'act') {
         const k = clamp(A.t / 0.26, 0, 1), prev = clamp((A.t - dt) / 0.26, 0, 1);
         B.x += Math.sin(A.yaw) * A.len * (k - prev); B.z += Math.cos(A.yaw) * A.len * (k - prev);
@@ -6051,7 +6186,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
           if (A.t < 0.15) turnTo(B, yawToPlayer(B), 14, dt);
           if (d > 2.6 && A.t < 0.2) { steer(B, pl.x, pl.z, 8, 10, dt, 1.0); integrate(B, dt, 1.4); }
           tgDisc(0, A.cx, A.cz, 1.95, 0xff3040, 0.4 + 0.45 * Math.abs(Math.sin(A.t * 24)));
-          if (A.t >= 0.36) { A.sub = 'hit'; A.t = 0; A.done = false; DP.sfx('claw'); }
+          if (A.t >= 0.5) { A.sub = 'hit'; A.t = 0; A.done = false; DP.sfx('claw'); }
         } else if (A.sub === 'hit') {
           tgDisc(0, A.cx, A.cz, 1.95, 0xffffff, 0.9);
           if (!A.done) {
@@ -6219,6 +6354,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     if (tgt === B.main) {
       if (src === 'sword') { fx('sparks', point, _a.set(0, 1, 0), 10, 0xffe9a0); DP.sfx('sword_hit', { vol: 0.5 }); return dmg * 0.1; }
       fx('sparks', point, _a.set(0, 0.6, 0.6), 4, 0xffdf90);
+      // пока окно слабых зон открыто, сфера корпуса перекрывает луч к пластинам — попадание в корпус засчитываем как почти полное
+      if (B.winOpen && src === 'gun') return dmg * 0.8;
       return dmg * (src === 'proj' ? 0.5 : 0.1);
     }
     // слабая зона
@@ -6276,8 +6413,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         if (A.t >= 0.8) {
           A.ph = 'act'; A.t = 0; B.heldRock.visible = false; B.g.updateMatrixWorld(true);
           B.rig.handR.getWorldPosition(_b); _b.y += 0.6;
-          playerHead(_a); _a.x += B.pv.x * 0.35; _a.z += B.pv.z * 0.35; _a.y -= 0.2;
-          throwRock(_b, _a.x, _a.y, _a.z, 26, 16, 0.6); DP.sfx('whoosh'); DP.sfx('sword_swing', { vol: 0.5, pitch: 0.5 });
+          playerHead(_a); _a.x += B.pv.x * 0.2; _a.z += B.pv.z * 0.2; _a.y -= 0.2;
+          throwRock(_b, _a.x, _a.y, _a.z, 19, 16, 0.6); DP.sfx('whoosh'); DP.sfx('sword_swing', { vol: 0.5, pitch: 0.5 });
           colossusOpen(B, 3);
           A.shots = (A.shots || 1);
         }
@@ -6287,9 +6424,9 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       }
     } else if (A.type === 'punch') {
       if (A.ph === 'tele') {
-        if (A.t < 0.5) { A.yaw = Math.atan2(pl.x - B.x, pl.z - B.z); turnTo(B, A.yaw, 6, dt); }
-        tgLine(0, B.x, B.z, A.yaw, 10, 2.9, A.t < 0.5 ? 0xff3040 : 0xff8090, 0.4 + 0.45 * Math.abs(Math.sin(A.t * 16)));
-        if (A.t >= 0.85) { A.ph = 'act'; A.t = 0; A.hit = false; tgOff('lines', 0); A.sx = B.x; A.sz = B.z; DP.sfx('boss_roar_colossus', { vol: 0.4 }); }
+        if (A.t < 0.4) { A.yaw = Math.atan2(pl.x - B.x, pl.z - B.z); turnTo(B, A.yaw, 6, dt); }
+        tgLine(0, B.x, B.z, A.yaw, 10, 2.9, A.t < 0.4 ? 0xff3040 : 0xff8090, 0.4 + 0.45 * Math.abs(Math.sin(A.t * 16)));
+        if (A.t >= 1.05) { A.ph = 'act'; A.t = 0; A.hit = false; tgOff('lines', 0); A.sx = B.x; A.sz = B.z; DP.sfx('boss_roar_colossus', { vol: 0.4 }); }
       } else if (A.ph === 'act') {
         const k = clamp(A.t / 0.22, 0, 1), pk = clamp((A.t - dt) / 0.22, 0, 1);
         B.x += Math.sin(A.yaw) * 3.2 * (k - pk); B.z += Math.cos(A.yaw) * 3.2 * (k - pk); clampArena(B, 2.5);
@@ -6373,7 +6510,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     cassandraResetCrystals(B, true);
   }
   function cassandraResetCrystals(B, instant) {
-    const hpMax = 120 * ((S().difficulty && S().difficulty.enemyHp) || 1);
+    const hpMax = 90 * ((S().difficulty && S().difficulty.enemyHp) || 1);
     B.crystals.forEach((c) => {
       c.hp = c.max = hpMax; c.alive = true; c.mesh.visible = true; c.t.alive = true;
       if (B.state === 'fight' || instant) { if (B.state === 'fight') regTarget(c.t); }
@@ -6383,11 +6520,11 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     c.alive = false; c.mesh.visible = false; unregTarget(c.t);
     c.mesh.getWorldPosition(_a);
     fx('explosion', _a, 0.9); fx('sparks', _a, _b.set(0, 1, 0), 18, 0xc89bff); fx('debris', _a, 0xb98cff, 8); DP.sfx('explosion', { vol: 0.5, pos: _a });
-    B.stagger = 0.5;
+    B.stagger = 0.5; DP.addAmmo(3);
     if (B.crystals.every((x) => !x.alive) && B.shieldUp) shieldDown(B, true);
   }
   function shieldDown(B, byCrystals) {
-    B.shieldUp = false; B.winT = 5; B.shieldMat.opacity = 0.0;
+    B.shieldUp = false; B.winT = 6; B.shieldMat.opacity = 0.0;
     B.crystals.forEach((c) => { if (c.alive) { c.alive = false; c.mesh.visible = false; unregTarget(c.t); } });
     B.main.radius = 1.2; B.main.priority = 2;
     DP.sfx('boss_roar_cassandra', { vol: 0.6 }); B.g.getWorldPosition(_a); _a.y += 1.5;
@@ -6397,7 +6534,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   }
   function shieldUpAgain(B) {
     B.shieldUp = true; B.winT = 0; B.shieldT = B.hp < B.maxHp * 0.65 ? 10 : 12;
-    B.main.radius = 2.4; B.main.priority = 1;
+    B.main.radius = 1.8; B.main.priority = 1;
     cassandraResetCrystals(B, false);
     B.g.getWorldPosition(_a); _a.y += 1.5; fx('ring', _a, 5, 0xb98cff, 0.5); DP.sfx('boss_roar_cassandra', { vol: 0.35, pitch: 1.3 });
   }
@@ -6568,9 +6705,9 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         const p = B.props.find((q) => q.st === 2);
         if (p) {
           p.st = 0; p.mesh.visible = false;
-          playerHead(_a); _a.x += B.pv.x * 0.3; _a.z += B.pv.z * 0.3; _a.y -= 0.3;
+          playerHead(_a); _a.x += B.pv.x * 0.2; _a.z += B.pv.z * 0.2; _a.y -= 0.3;
           _b.copy(p.mesh.position);
-          throwRock(_b, _a.x, _a.y, _a.z, 23, 14, 0.5); DP.sfx('sword_swing', { vol: 0.5, pitch: 0.6 });
+          throwRock(_b, _a.x, _a.y, _a.z, 17, 14, 0.5); DP.sfx('sword_swing', { vol: 0.5, pitch: 0.6 });
           fx('sparks', _b, _c.set(0, 1, 0), 6, 0xc89bff);
           A.next = 0.24;
         } else { atkDone(B); }
@@ -6580,10 +6717,10 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   function cassandraBeam(B, A, dt) {
     const pl = S().p;
     if (A.ph === 'tele') {
-      if (A.t < 0.7) { A.yaw = Math.atan2(pl.x - B.x, pl.z - B.z) + (A.off || 0); A.x0 = B.x; A.z0 = B.z; }
+      if (A.t < 0.5) { A.yaw = Math.atan2(pl.x - B.x, pl.z - B.z) + (A.off || 0); A.x0 = B.x; A.z0 = B.z; }
       else if (A.t < 0.72) { /* зафиксирован */ }
-      tgLine(0, A.x0, A.z0, A.yaw, 34, 2.2, A.t < 0.7 ? 0xc060ff : 0xff6090, 0.35 + 0.5 * Math.abs(Math.sin(A.t * 18)));
-      if (A.t >= 1.0) { A.ph = 'fire'; A.t = 0; A.hit = false; DP.sfx('shockwave', { vol: 0.8, pitch: 1.4 }); fx('flash', 0xc060ff, 0.12, 0.2); }
+      tgLine(0, A.x0, A.z0, A.yaw, 34, 2.2, A.t < 0.5 ? 0xc060ff : 0xff6090, 0.35 + 0.5 * Math.abs(Math.sin(A.t * 18)));
+      if (A.t >= 1.25) { A.ph = 'fire'; A.t = 0; A.hit = false; DP.sfx('shockwave', { vol: 0.8, pitch: 1.4 }); fx('flash', 0xc060ff, 0.12, 0.2); }
     } else {
       tgLine(0, A.x0, A.z0, A.yaw, 34, 2.2, 0xffffff, 0.85);
       // сам луч — мерцающая полоса над полом, через каждые несколько метров искры
@@ -6591,7 +6728,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       if (A.fxT <= 0) { A.fxT = 0.05; const l = rnd(2, 30); _a.set(A.x0 + Math.sin(A.yaw) * l, B.fy + 0.8, A.z0 + Math.cos(A.yaw) * l); fx('sparks', _a, _b.set(0, 1, 0), 3, 0xe0b0ff); }
       if (!A.hit) {
         const dd = lineDist(pl.x, pl.z, A.x0, A.z0, A.yaw, 34);
-        if (dd < 1.15 && !pl.sliding && (pl.y - B.fy) <= 0.9) { A.hit = true; _a.set(A.x0, B.fy + 1, A.z0); hurtPlayer(20, _a); fx('shake', 0.2); }
+        if (dd < 1.05 && !pl.sliding && (pl.y - B.fy) <= 0.9) { A.hit = true; _a.set(A.x0, B.fy + 1, A.z0); hurtPlayer(20, _a); fx('shake', 0.2); }
       }
       if (A.t >= 0.4) { tgOff('lines', 0); atkDone(B); }
     }
@@ -6668,13 +6805,13 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       dummy.updateMatrix(); B.motes.setMatrixAt(i, dummy.matrix);
     }
     B.motes.instanceMatrix.needsUpdate = true;
-    B.main.radius = B.shieldUp ? 2.4 : 1.2;
+    B.main.radius = B.shieldUp ? 1.8 : 1.2;
   }
   // ============================================================ определения боссов
   const DEFS = {
-    wolverine: { idx: 0, name: 'Росомаха', hp: 900, build: wolverineBuild, intro: wolverineIntro, pose: wolverinePose, mult: wolverineMult, ai: wolverineAI, death: wolverineDeath, fatalDist: 2.4, fatalSay: 'dp_fatality_wolverine', blood: true, roar: 'boss_roar_wolverine' },
-    colossus: { idx: 1, name: 'Колосс', hp: 1200, build: colossusBuild, intro: colossusIntro, pose: colossusPose, mult: colossusMult, ai: colossusAI, death: colossusDeath, fatalDist: 4.2, fatalSay: 'dp_fatality_colossus', blood: false, roar: 'boss_roar_colossus' },
-    cassandra: { idx: 2, name: 'Кассандра Нова', hp: 1600, build: cassandraBuild, intro: cassandraIntro, pose: cassandraPose, mult: cassandraMult, ai: cassandraAI, death: cassandraDeath, fatalDist: 3.6, fatalSay: 'dp_fatality_cassandra', blood: true, roar: 'boss_roar_cassandra' },
+    wolverine: { idx: 0, name: 'Росомаха', hp: 4500, build: wolverineBuild, intro: wolverineIntro, pose: wolverinePose, mult: wolverineMult, ai: wolverineAI, death: wolverineDeath, fatalDist: 2.4, fatalSay: 'dp_fatality_wolverine', blood: true, roar: 'boss_roar_wolverine' },
+    colossus: { idx: 1, name: 'Колосс', hp: 5000, build: colossusBuild, intro: colossusIntro, pose: colossusPose, mult: colossusMult, ai: colossusAI, death: colossusDeath, fatalDist: 4.2, fatalSay: 'dp_fatality_colossus', blood: false, roar: 'boss_roar_colossus' },
+    cassandra: { idx: 2, name: 'Кассандра Нова', hp: 3200, build: cassandraBuild, intro: cassandraIntro, pose: cassandraPose, mult: cassandraMult, ai: cassandraAI, death: cassandraDeath, fatalDist: 3.6, fatalSay: 'dp_fatality_cassandra', blood: true, roar: 'boss_roar_cassandra' },
   };
   // ============================================================ жизненный цикл босса
   function newBoss(id, arena) {
@@ -6926,6 +7063,15 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       if (DP.state) DP.state.slow = 1;
     },
     current() { return B; },
+    // видимые телеграфы (для тестов/бота): [{kind:'line'|'disc'|'ring', x, z, yaw, len, w, r, col, a}]
+    telegraphs() {
+      const out = [];
+      if (!TG.ok) return out;
+      TG.lines.forEach((s) => { if (s.g.visible) out.push({ kind: 'line', x: s.g.position.x, z: s.g.position.z, yaw: s.g.rotation.y, len: s.g.scale.z, w: s.g.scale.x, col: s.m[0].color.getHex(), a: s.m[0].opacity }); });
+      TG.discs.forEach((s) => { if (s.g.visible) out.push({ kind: 'disc', x: s.g.position.x, z: s.g.position.z, r: s.g.scale.x, col: s.m[0].color.getHex(), a: s.m[0].opacity }); });
+      TG.rings.forEach((s) => { if (s.g.visible) out.push({ kind: 'ring', x: s.g.position.x, z: s.g.position.z, r: s.g.scale.x, col: s.m[0].color.getHex(), a: s.m[0].opacity }); });
+      return out;
+    },
     update(dt) {
       const s = S();
       if (s.mode !== 'play') return;
@@ -7035,6 +7181,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const pad2 = (n) => (n < 10 ? '0' : '') + n;
   const fmtTime = (t) => { t = Math.max(0, Math.floor(t || 0)); return pad2(Math.floor(t / 60)) + ':' + pad2(t % 60); };
+  const VR_HINTS = [[1.5, 'Рука к бедру + хват — пистолеты'], [5.5, 'Рука за голову + хват — катаны'], [9.5, 'A — прыжок, B или присед — подкат']];
   const BOSS_NAMES = { wolverine: 'Росомаха', colossus: 'Колосс', cassandra: 'Кассандра Нова' };
   const WHO = [
     { re: /(^dp$|дедпул|deadpool|wade|уэйд)/i, name: 'Дедпул', color: '#ff3b4a' },
@@ -7076,12 +7223,12 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     return { name, w, h, mw, mh, order, dist, dy, canvas: c, ctx: c.getContext('2d'), dirty: true, visible: false, tex: null, mesh: null, key: '', draw: null };
   }
   const P = {
-    hud: mkPanel('hud', 1100, 350, 1.1, 0.35, 990, 1.9, -0.18),
-    sub: mkPanel('sub', 1400, 220, 1.3, 0.204, 991, 1.6, -0.55),
-    prompt: mkPanel('prompt', 1200, 300, 1.5, 0.375, 992, 2.2, 0.25),
+    hud: mkPanel('hud', 1100, 350, 1.0, 0.318, 990, 2.0, -0.62),
+    sub: mkPanel('sub', 1400, 220, 1.2, 0.189, 991, 2.0, -0.95),
+    prompt: mkPanel('prompt', 1200, 300, 1.5, 0.375, 992, 2.2, 0.2),
     banner: mkPanel('banner', 1400, 220, 1.7, 0.267, 993, 2.4, 0.6),
     boss: mkPanel('boss', 1200, 120, 1.3, 0.13, 991, 2.4, 0.95),
-    toast: mkPanel('toast', 1000, 120, 0.9, 0.108, 994, 2.4, 1.25),
+    toast: mkPanel('toast', 1000, 120, 0.9, 0.108, 994, 2.0, -0.28),
     menu: mkPanel('menu', 1600, 1000, 1.6, 1.0, 996, 2.0, 0),
   };
   const PANELS = Object.keys(P).map((k) => P[k]);
@@ -7147,7 +7294,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   }
   function controlsText() {
     const k = inputKind();
-    if (k === 'vr') return 'Наклон головы — смена полосы. A — прыжок (дважды = двойной), B — подкат. Рука к бедру + хват = пистолет, за голову + хват = катаны. Триггер — огонь.';
+    if (k === 'vr') return 'Наклон головы — смена полосы. A — прыжок (дважды = двойной), B или приседание — подкат. Рука к бедру + хват = пистолеты, рука за голову + хват = катаны (или короткое нажатие стика). Триггер — огонь. Удержи Y или оба стика — пауза.';
     if (k === 'touch') return 'Свайп влево/вправо — смена полосы, вверх — прыжок (дважды = двойной), вниз — подкат. Кнопки «Диг Л» / «Диг П» — огонь, «Рубить», «Смена» — оружие.';
     return 'A/D или ←/→ — смена полосы. Пробел — прыжок (дважды = двойной), S / Ctrl — подкат. ЛКМ / ПКМ — огонь правой / левой, F — рубить, Shift — блок, Q — смена оружия, R — перезарядка. Esc — пауза.';
   }
@@ -7178,9 +7325,11 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     const S = DP.state, w = DP.weapons, a = w && w.ammo;
     const nb = nextBossInfo();
     const ab = (h) => (a && a[h] ? a[h].mag + '/' + a[h].reserve : '-');
-    return [Math.ceil(S.hp), Math.floor(S.clock), Math.floor(S.dist), S.kills, S.timeScale || DP.settings.timeScale, ab('L'), ab('R'), reloading(0) ? 1 : 0, reloading(1) ? 1 : 0,
+    const vrm = inputKind() === 'vr', rl = reloading(0) || reloading(1);
+    const needBlink = S.hp < 30 || rl || (a && a.L && a.R && a.L.mag <= 0 && a.R.mag <= 0 && a.L.reserve <= 0 && a.R.reserve <= 0);
+    return [Math.ceil(S.hp), Math.floor(S.clock), vrm ? Math.floor(S.dist / 4) : Math.floor(S.dist), S.kills, S.timeScale || DP.settings.timeScale, ab('L'), ab('R'), reloading(0) ? 1 : 0, reloading(1) ? 1 : 0,
       nb ? (nb.fight ? 'F' : Math.floor(nb.frac * 100) + 'p' + Math.floor(nb.left)) : 'x', S.real < 8 ? Math.floor(S.real / 4) : -1,
-      Math.floor(now * 4) & 1, flash > 0 ? Math.ceil(flash * 8) : 0, inputKind(), w && w.hands ? (w.hands[0].equipped || '') + (w.hands[1].equipped || '') : ''].join('|');
+      needBlink ? Math.floor(now * 4) & 1 : 0, flash > 0 ? Math.ceil(flash * 8) : 0, inputKind(), w && w.hands ? (w.hands[0].equipped || '') + (w.hands[1].equipped || '') : ''].join('|');
   }
   function drawHUD() {
     const c = P.hud.ctx, S = DP.state, blink = (Math.floor(now * 4) & 1) === 1;
@@ -7241,7 +7390,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       }
     } else text(c, 'Боссов больше нет. Почти.', 100, 266, FONT(34), '#aaa', 'left');
     // подсказка
-    if (S.real < 8) {
+    if (S.real < 8 && inputKind() !== 'vr') {
       const t = hudTips(S.real);
       c.font = FONT(30);
       const tw = Math.min(1100, c.measureText(t).width + 50);
@@ -7363,6 +7512,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
           try { if (DP.input && DP.input.s && DP.input.s.calibrate) DP.input.s.calibrate(); } catch (e) { /* ignore */ }
           api.toast('Рост откалиброван');
         }));
+        widgets.push(chooser('Наклон ствола', 840, 570, 700, 86, () => { const a = st.aimPitch || 0; return { text: (a > 0 ? '+' : a < 0 ? '−' : '') + Math.abs(a) + '°' }; }, (d) => { st.aimPitch = clamp(Math.round(((st.aimPitch || 0) + d * 3) / 3) * 3, -30, 30); persist(); }));
+        widgets.push(chooser('Приседание = подкат', 840, 670, 700, 86, () => ({ text: st.crouchSlide !== false ? 'ВКЛ' : 'ВЫКЛ', on: st.crouchSlide !== false }), () => { st.crouchSlide = st.crouchSlide === false; persist(); }, { toggle: true }));
         widgets.push(vol('master', 'Громкость: общая', 840, 170));
         widgets.push(vol('voice', 'Громкость: голос', 840, 270));
         widgets.push(vol('sfx', 'Громкость: эффекты', 840, 370));
@@ -7393,7 +7544,9 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         break;
       }
     }
-    P.menu.visible = true; P.menu.dirty = true; menuPlace = true; composeDirty = true;
+    if (!P.menu.visible) menuPlace = true;
+    armed = false;
+    P.menu.visible = true; P.menu.dirty = true; composeDirty = true;
     updateOverlayInteractivity();
   }
   // ---------------------------------------------------------------- меню: рисование
@@ -7618,7 +7771,8 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   let rays = null, rayGeo = null, rayMat = null, dotGeo = null, dotMat = null;
   const _o = new THREE.Vector3(), _d = new THREE.Vector3(), _h = new THREE.Vector3(), _f = new THREE.Vector3(), _t = new THREE.Vector3();
   const _inv = new THREE.Matrix4();
-  let menuPlace = true;
+  let menuPlace = true, armed = false, menuReplaceT = 0;
+  let hintI = 0, hintCounted = false;
   const gaze = { yaw: 0, pitch: 0, moving: false, init: true };
   const hoverPrev = [-1, -1];
   function ensureVRPanel(p) {
@@ -7685,6 +7839,11 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     ensureRays();
     const ptrs = (DP.input && DP.input.s && DP.input.s.pointers) || [];
     let hover = -1, clicked = false;
+    // «вооружение» клика: все курки отпущены хотя бы раз после появления экрана (защита от случайного нажатия после смерти/победы)
+    let anyDown = false;
+    for (let k = 0; k < ptrs.length; k++) if (ptrs[k] && ptrs[k].down) anyDown = true;
+    if (!anyDown && rnow() - openAt > 0.35) armed = true;
+    const guard = screen === 'death' || screen === 'victory' ? 1.2 : 0.5;
     for (let k = 0; k < 2; k++) {
       const rd = rays && rays[k], ptr = ptrs[k];
       if (!rd) continue;
@@ -7715,7 +7874,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         rd.d.visible = true; rd.d.position.copy(ptr.origin).addScaledVector(ptr.dir, len);
         if (hoverPrev[k] !== idx) { try { if (DP.input.s.haptic) DP.input.s.haptic(typeof ptr.hand === 'number' && ptr.hand >= 0 ? ptr.hand : k, 0.25, 25); } catch (e) { /* ignore */ } }
         hover = idx;
-        if (ptr.pressed && !clicked && rnow() - openAt > 0.6) {
+        if (ptr.pressed && !clicked && armed && rnow() - openAt > guard) {
           const w = widgets[idx]; clicked = true;
           activate(idx, w.type === 'sel' ? (u < w.x + w.w / 2 ? -1 : 1) : 1);
         }
@@ -7805,7 +7964,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     },
     reset() {
       subs.length = 0; banner.t = 0; toastS.t = 0; promptS.on = false; boss.on = false; flash = 0; hudTimer = 0;
-      P.hud.key = ''; P.hud.dirty = true; composeDirty = true; gaze.init = true;
+      P.hud.key = ''; P.hud.dirty = true; composeDirty = true; gaze.init = true; hintI = 0; hintCounted = false;
     },
     showMenu() { statsData = null; build('main'); },
     showDeath(stats) { statsData = stats || {}; jokeText = JOKES[(Math.random() * JOKES.length) | 0]; build('death'); },
@@ -7854,6 +8013,19 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       else if (mode === 'menu' && screen !== 'main' && screen !== 'settings' && screen !== 'records') api.showMenu();
       else if (mode === 'paused' && screen !== 'pause' && screen !== 'settings') api.showPause();
       else if ((mode === 'dead' || mode === 'victory') && !screen) { if (mode === 'dead') api.showDeath(statsData); else api.showVictory(statsData); }
+      // подсказки жестов в первые секунды VR-забега (первые 5 забегов)
+      if (vr && mode === 'play' && !screen && hintI < 3) {
+        const w = DP.weapons && DP.weapons.hands, eq0 = w && w[0] ? w[0].equipped : 'gun', eq1 = w && w[1] ? w[1].equipped : 'gun';
+        const hn = VR_HINTS[hintI];
+        if (S.real >= hn[0]) {
+          if (!hintCounted) { hintCounted = true; const n = DP.save.get('vrHintRuns', 0); DP.save.set('vrHintRuns', n + 1); hintI = n >= 5 ? 99 : hintI; }
+          if (hintI < 3) {
+            const skip = (hintI === 0 && eq0 === 'none' && eq1 === 'none') || (hintI === 1 && (eq0 === 'sword' || eq1 === 'sword'));
+            if (!skip) api.toast(hn[1], 3.6);
+            hintI++;
+          }
+        }
+      }
       // таймеры
       for (let i = subs.length - 1; i >= 0; i--) { subs[i].t += dt; if (subs[i].t >= subs[i].dur) { subs.splice(i, 1); P.sub.dirty = true; composeDirty = true; } }
       if (banner.t > 0) { banner.t += dt; if (banner.t >= banner.dur) { banner.t = 0; composeDirty = true; } }
@@ -7925,6 +8097,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
       if (P.banner.mesh && P.banner.visible) { const k = clamp(banner.t / 0.25, 0, 1); P.banner.mesh.material.opacity = bannerAlpha(); P.banner.mesh.scale.setScalar(1 + 0.15 * (1 - k) * (1 - k)); }
       if (P.toast.mesh && P.toast.visible) P.toast.mesh.material.opacity = toastAlpha();
       if (P.prompt.mesh && P.prompt.visible) { P.prompt.mesh.material.opacity = clamp(promptS.t / 0.15, 0, 1); P.prompt.mesh.scale.setScalar(1 + 0.035 * Math.sin(now * 9)); }
+      if (menuReplaceT > 0) { menuReplaceT -= dt; if (menuReplaceT <= 0) menuPlace = true; } // после первых валидных кадров позы — перенести меню по реальному взгляду
       if (screen && P.menu.mesh) {
         if (menuPlace) placeMenu();
         vrPointers();
@@ -7936,7 +8109,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
     if (vr === curVR) return;
     curVR = vr;
     if (ovCanvas) ovCanvas.style.display = vr ? 'none' : 'block';
-    gaze.init = true; menuPlace = true; composeDirty = true;
+    gaze.init = true; menuPlace = true; composeDirty = true; menuReplaceT = vr ? 0.8 : 0;
     for (let i = 0; i < PANELS.length; i++) { PANELS[i].dirty = true; PANELS[i]._uploaded = false; if (!vr && PANELS[i].mesh) PANELS[i].mesh.visible = false; }
     if (!vr) hideRays();
     P.hud.key = '';
