@@ -15,7 +15,7 @@ self.addEventListener('fetch', (e) => {
   if (url.pathname.indexOf('/.well-known/') >= 0) return; // Digital Asset Links всегда из сети
   const isPage = req.mode === 'navigate' || url.pathname.endsWith('/') || url.pathname.endsWith('/index.html');
   if (isPage) { // network-first
-    e.respondWith(fetch(req).then((r) => { const cp = r.clone(); caches.open(VERSION).then((c) => c.put('index.html', cp)); return r; })
+    e.respondWith(fetch(new Request(req.url, { cache: 'no-store' })).then((r) => { const cp = r.clone(); caches.open(VERSION).then((c) => c.put('index.html', cp)); return r; })
       .catch(() => caches.match('index.html').then((r) => r || caches.match('./'))));
     return;
   }
