@@ -1,5 +1,5 @@
 // Сгенерировано tools/build.js. Версия кэша = хэш сборки.
-const VERSION = 'dpvr-df6503df0e';
+const VERSION = 'dpvr-68eb17fe32';
 const STATIC = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(STATIC)).then(() => self.skipWaiting()));

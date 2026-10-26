@@ -73,7 +73,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   };
   DP.settings = Object.assign({
     timeScale: 1, comfort: true, master: 0.8, sfx: 1, voice: 1, music: 0.5,
-    leanRange: 0.22, swingThreshold: 2.2, aimAssist: true, difficulty: 'normal', skin: 'classic', weaponSet: 'gold', quality: 'auto', aimPitch: 0, crouchSlide: true,
+    leanRange: 0.22, stepRange: 0.45, swingThreshold: 2.2, aimAssist: true, difficulty: 'normal', skin: 'classic', weaponSet: 'gold', quality: 'auto', aimPitch: 0, crouchSlide: true,
   }, DP.save.get('settings', {}));
   DP.saveSettings = () => DP.save.set('settings', DP.settings);
   if (DP.q.has('fast')) DP.settings.timeScale = Math.max(1, +DP.q.get('fast') || 10);
@@ -112,6 +112,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   let renderer, scene, camera, rig, glClock, dbgEl, vrBtn;
   let lowFpsT = 0, pixelRatioCur = 1;
   const vrOff = { y: 0, z: 0 }; // визуальное сглаживание телепортов игрока в VR (ступени, хват уступа)
+  // ---------- журнал ошибок и FPS (читается с шлема через DevTools: localStorage dpvr_errlog / dpvr_perf) ----------
+  DP.errLog = DP.save.get('errlog', []);
+  const logErr = (m) => { DP.errLog.push(new Date().toISOString().slice(11, 19) + ' ' + String(m).slice(0, 300)); if (DP.errLog.length > 60) DP.errLog.shift(); DP.save.set('errlog', DP.errLog); };
+  window.addEventListener('error', (e) => logErr('error: ' + e.message + ' @' + String(e.filename || '').split('/').pop() + ':' + e.lineno));
+  window.addEventListener('unhandledrejection', (e) => logErr('reject: ' + (e.reason && e.reason.message || e.reason)));
+  const _ce = console.error;
+  console.error = function () { try { logErr('console.error: ' + Array.prototype.join.call(arguments, ' ')); } catch (e) { /* ignore */ } _ce.apply(console, arguments); };
+  DP.perf = { n: 0, sum: 0, min: 999, low: 0, last: [] };
   DP.boot = function () {
     const canvas = document.createElement('canvas');
     canvas.id = 'gl';
@@ -556,6 +564,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0;
+      if (S.mode === 'play') { const pf = DP.perf; pf.n++; pf.sum += fps; if (fps < pf.min) pf.min = fps; if (fps < 60) pf.low++; pf.last.push(Math.round(fps)); if (pf.last.length > 40) pf.last.shift(); if (pf.n % 10 === 0) DP.save.set('perf', { n: pf.n, avg: Math.round(pf.sum / pf.n), min: Math.round(pf.min), low: pf.low, last: pf.last, calls: renderer.info.render.calls, tris: renderer.info.render.triangles, xr: renderer.xr.isPresenting }); }
       if (!renderer.xr.isPresenting && DP.settings.quality === 'auto') {
         if (fps < 40) lowFpsT += 0.5; else lowFpsT = Math.max(0, lowFpsT - 0.5);
         if (lowFpsT > 3 && pixelRatioCur > 1) { pixelRatioCur = Math.max(1, pixelRatioCur - 0.5); renderer.setPixelRatio(pixelRatioCur); lowFpsT = 0; }
@@ -619,7 +628,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     swipeId: -1, sx: 0, sy: 0, joyId: -1, jx: 0, jy: 0, joy: { x: 0, y: 0 }, joyEl: null, joyKnob: null,
     tapId: -1, tx: 0, ty: 0, tapDown: false, hasTap: false,
   };
-  let lane = 0, steerV = 0, mvX = 0, mvY = 0;
+  let lane = 0, steerV = 0, mvX = 0, mvY = 0, stepLane = 0;
   let lookYaw = 0, lookPitch = 0;
   let fakeOn = false, fakeSetsState = false;
   let prevMode = '', handsParentVR = null;
@@ -1027,14 +1036,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         if (!th && pb.trig) h.triggerReleased = true;
         h.grip = r.grip;
         if (r.grip && !pb.grip) h.gripPressed = true;
-        if (r.a && !pb.a) { h.btnA = true; s.jump = true; }
+        if (r.a && !pb.a) { h.btnA = true; if (i === 0) s.pausePressed = true; else s.jump = true; }
         if (r.b && !pb.b) { h.btnB = true; s.slide = true; }
         // стик (нажатие): короткое = смена оружия, оба вместе удерживать = пауза
         if (r.thumb) { thumbT[i] += dt; thumbBoth++; } else {
           if (pb.thumb && thumbT[i] < 0.35 && thumbChord < 0.01) swapEdge = true;
           thumbT[i] = 0;
         }
-        if (r.a) anyJump = true;
+        if (r.a && i === 1) anyJump = true;
         if (r.b) anySlide = true;
         pb.trig = th; pb.grip = r.grip; pb.a = r.a; pb.b = r.b; pb.thumb = r.thumb;
         h.stickX = Math.abs(r.sx) < 0.12 ? 0 : r.sx;
@@ -1077,18 +1086,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       const drop = calY - hl.y;
       if (drop < 0.2 * hk) crouchArmed = true;
       else if (crouchArmed && drop > 0.4 * hk && runSettle <= 0 && st.mode === 'play' && DP.settings.crouchSlide !== false) { crouchArmed = false; s.slide = true; }
-      // ----- steer: наклон головы, мёртвая зона, «магнит» к центрам полос, сглаживание -----
-      const lr = Math.max(0.05, DP.settings.leanRange || 0.22);
-      let n = (hl.x - calX) / lr;
-      const dz = 0.04;
-      n = Math.abs(n) < dz ? 0 : (n - Math.sign(n) * dz) / (1 - dz);
-      n = clamp(n, -1, 1);
-      // медленный возврат центра, пока игрок стоит в средней полосе (дрейф при перешагивании)
-      if (runSettle <= 0 && st.mode === 'play' && Math.abs(n) < 0.3) calX += (hl.x - calX) * Math.min(1, dt * 0.15);
-      // магнит: вблизи центра полосы ввод «прилипает» (убирает дрожание головы), непрерывно
-      const rn = Math.round(n), dn = n - rn, an = Math.abs(dn);
-      if (an < 0.3) { const u = an / 0.3; n = rn + dn * (0.45 + 0.55 * u * u); }
-      steerV += (n - steerV) * (1 - Math.exp(-dt * 11));
+      // ----- steer: шаг в сторону (реальное смещение головы ≈ на шаг), три полосы с гистерезисом -----
+      const sr = Math.max(0.2, DP.settings.stepRange || 0.45);
+      const dx = hl.x - calX;
+      const hiT = sr * 0.55, loT = sr * 0.3;
+      if (stepLane === 0) { if (dx < -hiT) stepLane = -1; else if (dx > hiT) stepLane = 1; }
+      else if (stepLane === -1) { if (dx > -loT) stepLane = 0; }
+      else if (dx < loT) stepLane = 0;
+      // медленный возврат центра, пока игрок стоит в средней полосе (дрейф)
+      if (runSettle <= 0 && st.mode === 'play' && stepLane === 0 && Math.abs(dx) < hiT * 0.6) calX += dx * Math.min(1, dt * 0.15);
+      steerV += (stepLane - steerV) * (1 - Math.exp(-dt * 9));
       s.steer = arena ? 0 : steerV;
     } else {
       // ===== плоские режимы =====
@@ -1177,7 +1184,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   // ---------- reset / init ----------
   function reset() {
-    lane = 0; steerV = 0; mvX = mvY = 0;
+    lane = 0; steerV = 0; mvX = mvY = 0; stepLane = 0;
     pend.jump = pend.slide = pend.pause = pend.swap = pend.reload = pend.attack = pend.ptr = false;
     pend.lane = 0; pend.fire[0] = pend.fire[1] = false;
     prevFire[0] = prevFire[1] = false;
@@ -7310,13 +7317,13 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
   }
   function controlsText() {
     const k = inputKind();
-    if (k === 'vr') return 'Наклон головы — смена полосы. A — прыжок (дважды = двойной), B или приседание — подкат. Рука к бедру + хват = пистолеты, рука за голову + хват = катаны (или короткое нажатие стика). Триггер — огонь. Удержи Y или оба стика — пауза.';
+    if (k === 'vr') return 'Шаг в сторону — смена полосы. Правая A — прыжок (дважды = двойной), B или приседание — подкат. Левая X — пауза/меню. Рука к бедру + хват = пистолеты, рука за голову + хват = катаны (или короткое нажатие стика). Триггер — огонь. В паузе есть «В меню» (скины, оружие).';
     if (k === 'touch') return 'Свайп влево/вправо — смена полосы, вверх — прыжок (дважды = двойной), вниз — подкат. Кнопки «Диг Л» / «Диг П» — огонь, «Рубить», «Смена» — оружие.';
     return 'A/D или ←/→ — смена полосы. Пробел — прыжок (дважды = двойной), S / Ctrl — подкат. ЛКМ / ПКМ — огонь правой / левой, F — рубить, Shift — блок, Q — смена оружия, R — перезарядка. Esc — пауза.';
   }
   function hudTips(real) {
     const k = inputKind(), i = Math.floor(real / 4);
-    if (k === 'vr') return i === 0 ? 'Наклон головы — полоса • A — прыжок (дважды) • B — подкат' : 'Рука к бедру + хват = пистолет • за голову + хват = катаны • Триггер — огонь';
+    if (k === 'vr') return i === 0 ? 'Шаг в сторону — полоса • A — прыжок (дважды) • B — подкат • X(лев.) — пауза' : 'Рука к бедру + хват = пистолет • за голову + хват = катаны • Триггер — огонь';
     if (k === 'touch') return i === 0 ? 'Свайп ←/→ — полоса • вверх — прыжок • вниз — подкат' : 'Кнопки внизу: огонь левой / правой, «Рубить», «Смена»';
     return i === 0 ? 'A/D или ←/→ — полоса • Пробел — прыжок (дважды) • S — подкат' : 'ЛКМ / ПКМ — огонь • F — рубить • Shift — блок • Q — смена • R — перезарядка';
   }
@@ -7521,7 +7528,7 @@ DP.voiceData = {"lines": [{"id": "dp_start_01", "cat": "dp_start", "text": "Пр
         const speeds = [1, 5, 10];
         widgets.push(chooser('Скорость времени', 60, 170, 700, 86, () => ({ text: '×' + st.timeScale }), (d) => { let i = speeds.indexOf(st.timeScale); if (i < 0) i = 0; st.timeScale = speeds[(i + d + 3) % 3]; persist(); }));
         widgets.push(chooser('Комфорт-режим', 60, 270, 700, 86, () => ({ text: st.comfort ? 'ВКЛ' : 'ВЫКЛ', on: !!st.comfort }), () => { st.comfort = !st.comfort; persist(); }, { toggle: true }));
-        widgets.push(chooser('Наклон головы', 60, 370, 700, 86, () => ({ text: st.leanRange.toFixed(2) + ' м' }), (d) => { st.leanRange = clamp(Math.round((st.leanRange + d * 0.02) * 100) / 100, 0.12, 0.4); persist(); }));
+        widgets.push(chooser('Шаг в сторону', 60, 370, 700, 86, () => ({ text: (st.stepRange || 0.45).toFixed(2) + ' м' }), (d) => { st.stepRange = clamp(Math.round(((st.stepRange || 0.45) + d * 0.05) * 100) / 100, 0.25, 0.8); persist(); }));
         widgets.push(chooser('Порог взмаха', 60, 470, 700, 86, () => ({ text: st.swingThreshold.toFixed(1) + ' м/с' }), (d) => { st.swingThreshold = clamp(Math.round((st.swingThreshold + d * 0.2) * 10) / 10, 1.2, 4.0); persist(); }));
         widgets.push(chooser('Помощь прицела', 60, 570, 700, 86, () => ({ text: st.aimAssist ? 'ВКЛ' : 'ВЫКЛ', on: !!st.aimAssist }), () => { st.aimAssist = !st.aimAssist; persist(); }, { toggle: true }));
         widgets.push(button('Калибровать рост', 60, 670, 700, 86, () => {
